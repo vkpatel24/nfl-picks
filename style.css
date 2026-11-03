@@ -1,0 +1,182 @@
+:root {
+  --bg: #fafaf9;
+  --panel: #ffffff;
+  --text: #1c1c1e;
+  --muted: #8a8a8e;
+  --line: #e7e7e5;
+  --hover: #f3f3f1;
+  --sel: #ebebe8;
+  --win: #1f8a4c;
+  --loss: #c4372f;
+  --live: #d4570f;
+  color-scheme: light;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #111112;
+    --panel: #19191b;
+    --text: #ededee;
+    --muted: #7c7c82;
+    --line: #2a2a2d;
+    --hover: #222225;
+    --sel: #2b2b2f;
+    --win: #3fb771;
+    --loss: #e5605a;
+    --live: #f08a3c;
+    color-scheme: dark;
+  }
+}
+
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font: 14px/1.4 -apple-system, BlinkMacSystemFont, "Inter", "Segoe UI", system-ui, sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+button { font: inherit; color: inherit; background: none; border: 0; cursor: pointer; }
+table { border-collapse: collapse; width: 100%; }
+[hidden] { display: none !important; }
+
+nav {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px;
+  white-space: nowrap;
+  padding: 14px 24px;
+  border-bottom: 1px solid var(--line);
+  position: sticky;
+  top: 0;
+  background: var(--bg);
+  z-index: 2;
+}
+.tab { padding: 6px 12px; border-radius: 6px; font-weight: 500; color: var(--muted); }
+.tab:hover { color: var(--text); }
+.tab.on { color: var(--text); background: var(--sel); }
+#status { margin-left: auto; color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }
+.live { color: var(--live); font-weight: 500; }
+
+main { padding: 24px; max-width: 1400px; margin: 0 auto; }
+
+.logo { width: 20px; height: 20px; object-fit: contain; vertical-align: middle; margin-right: 8px; flex: none; }
+
+/* ---------- regular season ---------- */
+
+#season { display: grid; grid-template-columns: minmax(0, 1fr) 420px; gap: 32px; align-items: start; }
+#divisions { display: grid; grid-template-columns: 1fr 1fr; gap: 24px; }
+.conf { display: flex; flex-direction: column; gap: 20px; }
+
+.div th {
+  text-align: left;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: .06em;
+  text-transform: uppercase;
+  color: var(--muted);
+  padding: 0 8px 6px;
+}
+.div td { padding: 6px 8px; border-top: 1px solid var(--line); }
+.div tr[data-team] { cursor: pointer; }
+.div tr[data-team]:hover td { background: var(--hover); }
+.div tr.sel td { background: var(--sel); }
+.div tbody tr:first-child .team { font-weight: 600; }
+.div .team { white-space: nowrap; }
+.div .seed { width: 20px; text-align: center; color: var(--muted); font-size: 12px; }
+.div .rec, .head .rec { text-align: right; font-variant-numeric: tabular-nums; width: 56px; }
+
+#schedule {
+  position: sticky;
+  top: 72px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 16px;
+}
+.head { display: flex; align-items: center; margin-bottom: 10px; }
+.head .logo { width: 28px; height: 28px; }
+.head h2 { margin: 0; font-size: 17px; font-weight: 600; flex: 1; }
+.head .rec { font-size: 15px; font-weight: 600; width: auto; }
+
+.sched td { padding: 7px 4px; border-top: 1px solid var(--line); white-space: nowrap; }
+.sched .wk { width: 24px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.sched .opp { cursor: pointer; }
+.sched .opp:hover { text-decoration: underline; text-underline-offset: 2px; }
+.sched .at { display: inline-block; width: 22px; color: var(--muted); font-size: 12px; }
+.sched .when { color: var(--muted); font-size: 12px; }
+.sched .right { text-align: right; font-variant-numeric: tabular-nums; }
+.sched .bye td { color: var(--muted); }
+
+.res { font-weight: 600; }
+.res.W { color: var(--win); }
+.res.L { color: var(--loss); }
+.score { color: var(--muted); }
+.ok, .bad { display: inline-block; width: 16px; margin-left: 4px; font-size: 12px; }
+.ok { color: var(--win); }
+.bad { color: var(--loss); }
+
+.pick { display: inline-flex; border: 1px solid var(--line); border-radius: 6px; overflow: hidden; }
+.pick button { width: 28px; padding: 3px 0; color: var(--muted); font-size: 12px; font-weight: 600; }
+.pick button + button { border-left: 1px solid var(--line); }
+.pick button:hover { background: var(--hover); color: var(--text); }
+.pick button.on { background: var(--sel); color: var(--text); }
+.pick button.on.W { background: var(--win); color: #fff; }
+.pick button.on.L { background: var(--loss); color: #fff; }
+
+/* ---------- playoffs ---------- */
+
+.bracket { display: flex; gap: 20px; align-items: stretch; justify-content: center; }
+.pconf { display: flex; gap: 20px; }
+.pconf.NFC { flex-direction: row-reverse; }
+.round { display: flex; flex-direction: column; width: 172px; min-height: 360px; }
+.games { flex: 1; display: flex; flex-direction: column; justify-content: space-around; gap: 16px; }
+.round h3 {
+  margin: 0 0 12px;
+  white-space: nowrap;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: .06em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+.round.sb h3 { text-align: center; }
+.round.sb .games { justify-content: center; }
+
+.game { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
+.glabel { font-size: 11px; padding: 4px 10px 0; color: var(--muted); }
+.slot { display: flex; align-items: center; padding: 7px 10px; min-height: 36px; }
+.slot + .slot { border-top: 1px solid var(--line); }
+.slot.click { cursor: pointer; }
+.slot.click:hover { background: var(--hover); }
+.slot.tbd { color: var(--muted); }
+.slot.won { font-weight: 600; }
+.slot.won .nm::after { content: ""; display: inline-block; width: 6px; height: 6px; border-radius: 50%; background: var(--win); margin-left: 8px; vertical-align: middle; }
+.slot.lost { color: var(--muted); }
+.slot.lost .logo { opacity: .45; }
+.slot .sd { width: 16px; color: var(--muted); font-size: 12px; font-weight: 400; font-variant-numeric: tabular-nums; }
+.slot .nm { flex: 1; }
+.slot .score { font-variant-numeric: tabular-nums; }
+
+/* ---------- narrow ---------- */
+
+@media (max-width: 1240px) {
+  .bracket { flex-direction: column; align-items: stretch; }
+  .pconf, .pconf.NFC { flex-direction: row; }
+  .round { flex: 1; width: auto; min-height: 0; }
+  .games { justify-content: flex-start; }
+  .round.sb { max-width: 240px; order: 2; }
+  .round.sb h3 { text-align: left; }
+}
+@media (max-width: 900px) {
+  main { padding: 16px; }
+  nav { padding: 12px 16px; }
+  #season { grid-template-columns: 1fr; }
+  #schedule { position: static; }
+}
+@media (max-width: 600px) {
+  #divisions { grid-template-columns: 1fr; }
+  .pconf, .pconf.NFC { flex-direction: column; }
+  .round.sb { max-width: none; }
+  .sched .when { display: none; }
+}
