@@ -34,7 +34,10 @@ let picks = load(`picks-${SEASON}`, {});   // regular season: game id -> winner
 let ppicks = load(`ppicks-${SEASON}`, {}); // playoffs: "round:A-B" -> winner
 let selected = load('selected', 'BUF');
 let tab = load('tab', 'season');
-let updatedAt = null;
+let mode = load('mode', 'mine');            // whose picks fill the board: 'mine' | 'market'
+let showOdds = load('showOdds', false);
+let lines = load(`lines-${SEASON}`, {});    // game id -> home win prob from that game's Polymarket market
+let updatedAt = null, oddsAt = null, oddsErr = false;
 
 // ---------- data ----------
 
@@ -49,7 +52,7 @@ function parseEvent(e, type, week) {
   let winner = null;
   if (final) winner = home.winner ? h : away.winner ? a : 'TIE';
   return {
-    id: e.id, type, week, date: e.date, home: h, away: a,
+    id: e.id, type, week, date: e.date, home: h, away: a, neutral: !!c.neutralSite,
     state: st.state, final, winner,
     hs: +home.score || 0, as: +away.score || 0,
     detail: st.shortDetail,
@@ -103,24 +106,138 @@ function poll() {
     const weeks = activeWeeks();
     if (weeks.length) refresh(weeks);
   }
+  if (Date.now() - lastOdds > 5 * 60 * 1000) refreshOdds();
+}
+
+// ---------- odds (Polymarket) ----------
+
+const GAMMA = 'https://gamma-api.polymarket.com';
+const pmAbbr = t => ({ LAR: 'la', WSH: 'was' })[t] || t.toLowerCase();
+const ymd = (d, timeZone) => new Date(d).toLocaleDateString('en-CA', { timeZone });
+
+// Game markets are slugged nfl-{away}-{home}-{date}; only ~3 weeks out are listed.
+async function fetchLines() {
+  const want = {};
+  for (const g of Object.values(games)) {
+    if (g.final) continue;
+    for (const tz of ['UTC', 'America/New_York']) want[`nfl-${pmAbbr(g.away)}-${pmAbbr(g.home)}-${ymd(g.date, tz)}`] = g;
+  }
+  const slugs = Object.keys(want), out = {};
+  const chunks = [];
+  for (let i = 0; i < slugs.length; i += 40) chunks.push(slugs.slice(i, i + 40));
+  await Promise.all(chunks.map(async chunk => {
+    const res = await fetch(`${GAMMA}/markets?limit=100&${chunk.map(s => 'slug=' + s).join('&')}`);
+    if (!res.ok) throw new Error(res.status);
+    for (const m of await res.json()) {
+      const g = want[m.slug];
+      if (!g || !m.outcomePrices) continue;
+      const i = JSON.parse(m.outcomes).indexOf(name(g.home));
+      if (i >= 0) out[g.id] = +JSON.parse(m.outcomePrices)[i];
+    }
+  }));
+  return out;
+}
+
+let lastOdds = 0;
+async function refreshOdds() {
+  if (!Object.keys(games).length) return;
+  lastOdds = Date.now();
+  try {
+    lines = await fetchLines();
+    save(`lines-${SEASON}`, lines);
+    oddsAt = new Date(); oddsErr = false;
+  } catch (err) {
+    console.error(err);
+    oddsErr = true;
+  }
+  render();
+}
+
+// ---------- Elo fallback ----------
+
+// Games without a Polymarket market use FiveThirtyEight's open-source NFL Elo:
+// last season's results seed the ratings (regressed 1/3 toward 1505), then this season's.
+const HFA = 48, K = 20;
+let history = load(`history-${SEASON - 1}`, null); // last season's finals: [date, home, away, hs, as, neutral]
+
+async function fetchHistory() {
+  if (history) return;
+  try {
+    const weeks = await Promise.all(allWeeks().map(async ([type, week]) => {
+      const res = await fetch(`${API}?dates=${SEASON - 1}&seasontype=${type}&week=${week}`);
+      if (!res.ok) throw new Error(res.status);
+      return (await res.json()).events || [];
+    }));
+    history = weeks.flat().map(e => parseEvent(e, 0, 0)).filter(g => g && g.final)
+      .map(g => [g.date, g.home, g.away, g.hs, g.as, g.neutral]);
+    save(`history-${SEASON - 1}`, history);
+    render();
+  } catch (err) {
+    console.error(err);
+  }
+}
+
+const eloP = diff => 1 / (1 + 10 ** (-diff / 400));
+
+let eloCache = { key: null, elo: null };
+function ratings() {
+  const done = Object.values(games).filter(g => g.final && g.winner)
+    .map(g => [g.date, g.home, g.away, g.hs, g.as, g.neutral]);
+  const key = (history?.length || 0) + ':' + done.length;
+  if (eloCache.key === key) return eloCache.elo;
+  const elo = Object.fromEntries(ABBRS.map(t => [t, 1505]));
+  const play = list => {
+    for (const [, h, a, hs, as, neutral] of [...list].sort((x, y) => x[0] < y[0] ? -1 : 1)) {
+      const diff = elo[h] - elo[a] + (neutral ? 0 : HFA);
+      const res = hs > as ? 1 : hs < as ? 0 : 0.5;
+      const winDiff = res === 0 ? -diff : diff;
+      const mult = Math.log(Math.abs(hs - as) + 1) * 2.2 / (winDiff * 0.001 + 2.2);
+      const shift = K * mult * (res - eloP(diff));
+      elo[h] += shift; elo[a] -= shift;
+    }
+  };
+  if (history) {
+    play(history);
+    for (const t of ABBRS) elo[t] = elo[t] * 2 / 3 + 1505 / 3;
+  }
+  play(done);
+  eloCache = { key, elo };
+  return elo;
+}
+
+// Chance t beats opp, from the game's own market when there is one, else Elo.
+// home is null at a neutral site.
+function winChance(t, opp, g, home, playoff = g?.type === 3) {
+  if (g && lines[g.id] != null) return { p: g.home === t ? lines[g.id] : 1 - lines[g.id], est: false };
+  const elo = ratings();
+  let diff = elo[t] - elo[opp] + (home === t ? HFA : home === opp ? -HFA : 0);
+  if (playoff) diff *= 1.2;
+  return { p: eloP(diff), est: true };
+}
+
+const gameChance = (g, t) => winChance(t, t === g.home ? g.away : g.home, g, g.neutral ? null : g.home);
+
+function marketPick(g) {
+  const c = gameChance(g, g.home);
+  return c ? (c.p >= 0.5 ? g.home : g.away) : null;
 }
 
 // ---------- standings ----------
 
 const regular = () => Object.values(games).filter(g => g.type === 2);
 
-function outcome(g) {
+function outcome(g, view = mode) {
   if (g.final) return g.winner;
-  return picks[g.id] || null;
+  return view === 'market' ? marketPick(g) : picks[g.id] || null;
 }
 
-function buildRecords() {
+function buildRecords(view) {
   const R = {};
   for (const t of ABBRS) R[t] = { results: [], opps: [] };
   for (const g of regular()) {
     R[g.home].opps.push(g.away);
     R[g.away].opps.push(g.home);
-    const o = outcome(g);
+    const o = outcome(g, view);
     if (!o) continue;
     for (const [t, opp] of [[g.home, g.away], [g.away, g.home]]) {
       R[t].results.push({ opp, r: o === 'TIE' ? 0.5 : o === t ? 1 : 0 });
@@ -205,8 +322,8 @@ function rank(R, teams, tiebreak) {
   return out;
 }
 
-function standings() {
-  const R = buildRecords();
+function standings(view = mode) {
+  const R = buildRecords(view);
   const divisions = {};
   for (const c of CONFS) for (const d of DIVS) {
     const key = c + ' ' + d;
@@ -235,31 +352,39 @@ function postGame(round, a, b) {
 
 const pkey = (round, a, b) => `${round}:${[a, b].sort().join('-')}`;
 
-function matchup(round, a, b) {
+// a hosts unless it's the Super Bowl.
+function matchup(round, a, b, view) {
   if (!a || !b) return { round, a, b, winner: null };
   const g = postGame(round, a, b);
-  if (g && g.final) return { round, a, b, g, winner: g.winner, locked: true };
-  return { round, a, b, g, winner: ppicks[pkey(round, a, b)] || null };
+  const home = g ? (g.neutral ? null : g.home) : round === 5 ? null : a;
+  const c = winChance(a, b, g, home, true);
+  const chance = { [a]: c, [b]: { p: 1 - c.p, est: c.est } };
+  if (g && g.final) return { round, a, b, g, chance, winner: g.winner, locked: true };
+  const winner = view === 'market' ? (c.p >= 0.5 ? a : b) : ppicks[pkey(round, a, b)] || null;
+  return { round, a, b, g, chance, winner };
 }
 
-function bracket(seeds) {
+function bracket(seeds, view = mode) {
+  const matchup_ = (round, a, b) => matchup(round, a, b, view);
   const out = {};
   for (const c of CONFS) {
     const s = seeds[c].slice(0, 7);
     const seed = t => s.indexOf(t) + 1;
-    const wc = [[1, 6], [2, 5], [3, 4]].map(([i, j]) => matchup(1, s[i], s[j]));
+    const wc = [[1, 6], [2, 5], [3, 4]].map(([i, j]) => matchup_(1, s[i], s[j]));
     let dv;
     const wcw = wc.map(m => m.winner);
     if (wcw.every(Boolean)) {
       const left = wcw.sort((x, y) => seed(x) - seed(y));
-      dv = [matchup(2, s[0], left[2]), matchup(2, left[0], left[1])];
+      dv = [matchup_(2, s[0], left[2]), matchup_(2, left[0], left[1])];
     } else {
-      dv = [matchup(2, s[0], null), matchup(2, null, null)];
+      dv = [matchup_(2, s[0], null), matchup_(2, null, null)];
     }
-    const cc = matchup(3, dv[0].winner, dv[1].winner);
+    const ccTeams = [dv[0].winner, dv[1].winner];
+    if (ccTeams.every(Boolean)) ccTeams.sort((x, y) => seed(x) - seed(y));
+    const cc = matchup_(3, ...ccTeams);
     out[c] = { s, seed, wc, dv, cc };
   }
-  out.sb = matchup(5, out.AFC.cc.winner, out.NFC.cc.winner);
+  out.sb = matchup_(5, out.AFC.cc.winner, out.NFC.cc.winner);
   return out;
 }
 
@@ -275,12 +400,25 @@ function logo(t) {
 
 const fmtDate = d => new Date(d).toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric' });
 
+const ODDS_TIP = {
+  false: 'Polymarket game line',
+  true: 'No Polymarket line yet — FiveThirtyEight-style Elo estimate',
+};
+
+// "63%" for a { p, est } chance; Elo estimates get a "~".
+function oddsTag(c) {
+  if (!c) return '';
+  const pct = Math.round(c.p * 100);
+  return `<span class="odds ${c.p >= 0.5 ? 'fav' : 'dog'} ${c.est ? 'est' : ''}" title="${ODDS_TIP[c.est]}">${c.est ? '~' : ''}${pct}%</span>`;
+}
+
 function renderStatus() {
   const live = Object.values(games).filter(g => g.state === 'in').length;
-  const left = regular().filter(g => !outcome(g)).length;
+  const left = regular().filter(g => !outcome(g, 'mine')).length;
   const parts = [];
   if (live) parts.push(`<b class="live">${live} live</b>`);
-  if (left) parts.push(`${left} unpicked`);
+  if (mode === 'mine' && left && tab !== 'report') parts.push(`${left} unpicked`);
+  if (oddsErr) parts.push('Polymarket unavailable');
   if (updatedAt) parts.push(`Updated ${updatedAt.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}`);
   $('#status').innerHTML = parts.join(' · ');
 }
@@ -310,15 +448,16 @@ function renderSchedule({ R }) {
     $('#schedule').innerHTML = `<div class="head">${logo(t)}<h2>${name(t)}</h2></div><p class="empty">Loading schedule…</p>`;
     return;
   }
+  const market = mode === 'market';
   const list = regular().filter(g => g.home === t || g.away === t).sort((a, b) => a.week - b.week);
   const byWeek = Object.fromEntries(list.map(g => [g.week, g]));
   const maxWeek = Math.max(18, ...list.map(g => g.week));
   const rows = [];
   for (let w = 1; w <= maxWeek; w++) {
     const g = byWeek[w];
-    if (!g) { rows.push(`<tr class="bye"><td class="wk">${w}</td><td colspan="3">Bye</td></tr>`); continue; }
+    if (!g) { rows.push(`<tr class="bye"><td class="wk">${w}</td><td colspan="${showOdds ? 4 : 3}">Bye</td></tr>`); continue; }
     const home = g.home === t, opp = home ? g.away : g.home;
-    const pick = picks[g.id];
+    const pick = market ? (g.final ? null : marketPick(g)) : picks[g.id];
     const mine = pick ? (pick === t ? 'W' : 'L') : null;
     let right;
     if (g.final) {
@@ -327,8 +466,9 @@ function renderSchedule({ R }) {
       const mark = mine ? (mine === res ? '<span class="ok">✓</span>' : '<span class="bad">✗</span>') : '';
       right = `<span class="res ${res}">${res}</span> <span class="score">${score}</span>${mark}`;
     } else {
-      right = `<span class="pick" data-game="${g.id}">
-        <button data-v="${t}" class="${mine === 'W' ? 'on W' : ''}">W</button><button data-v="" class="${!mine ? 'on' : ''}">–</button><button data-v="${opp}" class="${mine === 'L' ? 'on L' : ''}">L</button>
+      const dis = market ? 'disabled' : '';
+      right = `<span class="pick ${market ? 'locked' : ''}" data-game="${g.id}">
+        <button ${dis} data-v="${t}" class="${mine === 'W' ? 'on W' : ''}">W</button><button ${dis} data-v="" class="${!mine ? 'on' : ''}">–</button><button ${dis} data-v="${opp}" class="${mine === 'L' ? 'on L' : ''}">L</button>
       </span>`;
     }
     const when = g.state === 'in'
@@ -338,11 +478,12 @@ function renderSchedule({ R }) {
       <td class="wk">${w}</td>
       <td class="opp" data-team="${opp}"><span class="at">${home ? 'vs' : '@'}</span>${logo(opp)}${name(opp)}</td>
       <td class="when">${when}</td>
+      ${showOdds ? `<td class="pct">${g.final ? '' : oddsTag(gameChance(g, t))}</td>` : ''}
       <td class="right">${right}</td>
     </tr>`);
   }
   $('#schedule').innerHTML = `
-    <div class="head">${logo(t)}<h2>${name(t)}</h2><span class="rec">${recStr(R[t])}</span></div>
+    <div class="head">${logo(t)}<h2>${name(t)}</h2>${market ? '<span class="chip">Polymarket picks</span>' : ''}<span class="rec">${recStr(R[t])}</span></div>
     <table class="sched"><tbody>${rows.join('')}</tbody></table>`;
 }
 
@@ -351,7 +492,8 @@ function teamRow(m, t, b) {
   const g = m.g, cls = m.winner ? (m.winner === t ? 'won' : 'lost') : '';
   let score = '';
   if (g && (g.final || g.state === 'in')) score = `<span class="score">${g.home === t ? g.hs : g.as}</span>`;
-  const clickable = m.a && m.b && !m.locked;
+  else if (showOdds && m.chance) score = oddsTag(m.chance[t]);
+  const clickable = m.a && m.b && !m.locked && mode === 'mine';
   return `<div class="slot ${cls} ${clickable ? 'click' : ''}" ${clickable ? `data-key="${pkey(m.round, m.a, m.b)}" data-v="${t}"` : ''}>
     <span class="sd">${b.seed(t) || ''}</span>${logo(t)}<span class="nm">${name(t)}</span>${score}
   </div>`;
@@ -360,6 +502,11 @@ function teamRow(m, t, b) {
 function game(m, b, label) {
   const live = m.g && m.g.state === 'in' ? `<div class="glabel live">${esc(m.g.detail)}</div>` : label ? `<div class="glabel">${label}</div>` : '';
   return `<div class="game">${live}${teamRow(m, m.a, b)}${teamRow(m, m.b, b)}</div>`;
+}
+
+function roman(n) {
+  return [[50, 'L'], [40, 'XL'], [10, 'X'], [9, 'IX'], [5, 'V'], [4, 'IV'], [1, 'I']]
+    .reduce((s, [v, r]) => { while (n >= v) { s += r; n -= v; } return s; }, '');
 }
 
 function renderPlayoffs({ seeds }) {
@@ -372,20 +519,126 @@ function renderPlayoffs({ seeds }) {
     </div>`;
   };
   const sbSeed = { seed: t => b[conf(t)].seed(t) };
+  const champ = b.sb.winner && b.sb.winner !== 'TIE'
+    ? `<div class="sb-champ">${logo(b.sb.winner)}<span>Champion</span><b>${name(b.sb.winner)}</b></div>` : '';
   $('#playoffs').innerHTML = `
     <div class="bracket">
       ${confBlock('AFC')}
-      <div class="round sb"><h3>Super Bowl</h3><div class="games">${game(b.sb, sbSeed)}</div></div>
+      <div class="round sb"><h3>Super Bowl ${roman(SEASON - 1965)}</h3><div class="games"><div class="sb-game">${game(b.sb, sbSeed)}${champ}</div></div></div>
       ${confBlock('NFC')}
     </div>`;
 }
 
+// ---------- disagreements ----------
+
+const ROUND = { 1: 'Wild Card', 2: 'Divisional', 3: 'Conf. Champ.', 5: 'Super Bowl' };
+const teamTag = t => t ? `<span class="tm">${logo(t)}${name(t)}</span>` : '<span class="tm muted">—</span>';
+
+function renderReport() {
+  const me = standings('mine'), mk = standings('market');
+  const myB = bracket(me.seeds, 'mine'), mkB = bracket(mk.seeds, 'market');
+
+  // Every unplayed game you picked, with the market's chance for your side.
+  const picked = [];
+  for (const g of regular()) {
+    const p = picks[g.id];
+    if (g.final || !p) continue;
+    picked.push({ when: 'Wk ' + g.week, order: g.week, pick: p, opp: p === g.home ? g.away : g.home, at: p === g.away, c: gameChance(g, p) });
+  }
+  for (const c of CONFS) for (const m of [...myB[c].wc, ...myB[c].dv, myB[c].cc]) {
+    if (m.winner && !m.locked) picked.push({ when: c + ' ' + ROUND[m.round], order: 100 + m.round, pick: m.winner, opp: m.winner === m.a ? m.b : m.a, at: m.winner === m.b, c: m.chance[m.winner] });
+  }
+  if (myB.sb.winner && !myB.sb.locked) {
+    const m = myB.sb;
+    picked.push({ when: 'Super Bowl', order: 105, pick: m.winner, opp: m.winner === m.a ? m.b : m.a, neutral: true, c: m.chance[m.winner] });
+  }
+  const against = picked.filter(x => x.c.p < 0.5).sort((x, y) => x.c.p - y.c.p);
+
+  const gameRows = against.map(x => `
+    <tr>
+      <td class="wk">${x.when}</td>
+      <td>${teamTag(x.pick)}<span class="vs">${x.neutral ? 'vs' : x.at ? '@' : 'vs'}</span>${teamTag(x.opp)}</td>
+      <td class="bar"><span class="meter"><i style="width:${Math.round(x.c.p * 100)}%"></i></span>${oddsTag(x.c)}</td>
+    </tr>`).join('');
+
+  // Teams you're higher or lower on, over the games you picked.
+  const swing = {};
+  for (const g of regular()) {
+    const p = picks[g.id];
+    if (g.final || !p) continue;
+    const mp = marketPick(g);
+    for (const t of [g.home, g.away]) {
+      swing[t] ??= { me: 0, mk: 0, n: 0 };
+      swing[t].n++;
+      if (p === t) swing[t].me++;
+      if (mp === t) swing[t].mk++;
+    }
+  }
+  const teams = Object.entries(swing).map(([t, s]) => ({ t, ...s, d: s.me - s.mk }))
+    .filter(x => x.d).sort((x, y) => Math.abs(y.d) - Math.abs(x.d) || y.d - x.d).slice(0, 10);
+  const teamRows = teams.map(x => `
+    <tr>
+      <td>${teamTag(x.t)}</td>
+      <td class="num">${x.me}-${x.n - x.me}</td>
+      <td class="num">${x.mk}-${x.n - x.mk}</td>
+      <td class="num ${x.d > 0 ? 'up' : 'down'}">${x.d > 0 ? '+' : ''}${x.d}</td>
+    </tr>`).join('');
+
+  const divRows = CONFS.flatMap(c => DIVS.map(d => c + ' ' + d))
+    .filter(k => me.divisions[k][0] !== mk.divisions[k][0])
+    .map(k => `<tr><td class="wk">${k}</td><td>${teamTag(me.divisions[k][0])}</td><td>${teamTag(mk.divisions[k][0])}</td></tr>`).join('');
+
+  const field = CONFS.map(c => {
+    const a = me.seeds[c].slice(0, 7), b = mk.seeds[c].slice(0, 7);
+    const onlyMe = a.filter(t => !b.includes(t)), onlyMk = b.filter(t => !a.includes(t));
+    if (!onlyMe.length) return '';
+    return `<tr><td class="wk">${c}</td><td>${onlyMe.map(teamTag).join('')}</td><td>${onlyMk.map(teamTag).join('')}</td></tr>`;
+  }).join('');
+
+  const unpicked = regular().filter(g => !g.final && !picks[g.id]).length;
+  const agree = picked.length - against.length;
+
+  $('#report').innerHTML = `
+    <div class="tiles">
+      <div class="tile"><b>${picked.length ? Math.round(agree / picked.length * 100) + '%' : '—'}</b><span>of your picks match Polymarket (${agree} of ${picked.length})</span></div>
+      <div class="tile"><b>${against.length}</b><span>picks against the favorite</span></div>
+      <div class="tile champ"><span>Your champion</span>${teamTag(myB.sb.winner)}<span>Polymarket's</span>${teamTag(mkB.sb.winner)}</div>
+    </div>
+    ${unpicked ? `<p class="note">${unpicked} regular-season games still unpicked, so your standings and bracket are incomplete.</p>` : ''}
+    <div class="cols">
+      <div class="card">
+        <h3>Biggest disagreements</h3>
+        ${gameRows ? `<table class="rep"><thead><tr><th></th><th>Your pick</th><th>Polymarket gives them</th></tr></thead><tbody>${gameRows}</tbody></table>`
+          : `<p class="empty">${picked.length ? 'You’re with the favorite on every pick.' : 'Make some picks under My Picks to compare.'}</p>`}
+      </div>
+      <div class="side">
+        <div class="card">
+          <h3>Division winners</h3>
+          ${divRows ? `<table class="rep"><thead><tr><th></th><th>You</th><th>Polymarket</th></tr></thead><tbody>${divRows}</tbody></table>` : '<p class="empty">Same eight division winners.</p>'}
+        </div>
+        <div class="card">
+          <h3>Playoff field</h3>
+          ${field ? `<table class="rep"><thead><tr><th></th><th>Only you have in</th><th>Only Polymarket has in</th></tr></thead><tbody>${field}</tbody></table>` : '<p class="empty">Same 14 playoff teams.</p>'}
+        </div>
+        <div class="card">
+          <h3>Higher / lower than the market</h3>
+          ${teamRows ? `<table class="rep"><thead><tr><th>In games you picked</th><th class="num">You</th><th class="num">PM</th><th class="num">±</th></tr></thead><tbody>${teamRows}</tbody></table>` : '<p class="empty">No differences yet.</p>'}
+        </div>
+      </div>
+    </div>
+    <p class="note">Percentages come from each game’s Polymarket line (listed about three weeks out). Further-out games and hypothetical playoff matchups marked “~” use an open-source Elo model (FiveThirtyEight’s NFL method) built from last season and this season’s results.</p>`;
+}
+
 function render() {
-  const st = standings();
   for (const el of document.querySelectorAll('.tab')) el.classList.toggle('on', el.dataset.tab === tab);
-  $('#season').hidden = tab !== 'season';
-  $('#playoffs').hidden = tab !== 'playoffs';
+  for (const el of document.querySelectorAll('[data-mode]')) el.classList.toggle('on', el.dataset.mode === mode);
+  $('#odds-toggle').checked = showOdds;
+  $('#filters').hidden = tab === 'report';
+  document.body.classList.toggle('market', mode === 'market');
+  for (const id of ['season', 'playoffs', 'report']) $('#' + id).hidden = tab !== id;
   renderStatus();
+  if (tab === 'report') { renderReport(); return; }
+  const st = standings();
   if (tab === 'season') { renderDivisions(st); renderSchedule(st); }
   else renderPlayoffs(st);
 }
@@ -396,8 +649,12 @@ document.addEventListener('click', e => {
   const tabBtn = e.target.closest('.tab');
   if (tabBtn) { tab = tabBtn.dataset.tab; save('tab', tab); render(); return; }
 
+  const modeBtn = e.target.closest('[data-mode]');
+  if (modeBtn) { mode = modeBtn.dataset.mode; save('mode', mode); render(); return; }
+
   const pickBtn = e.target.closest('.pick button');
   if (pickBtn) {
+    if (mode !== 'mine') return;
     const id = pickBtn.parentElement.dataset.game;
     if (pickBtn.dataset.v) picks[id] = pickBtn.dataset.v; else delete picks[id];
     save(`picks-${SEASON}`, picks);
@@ -423,8 +680,13 @@ document.addEventListener('click', e => {
   }
 });
 
+$('#odds-toggle').addEventListener('change', e => { showOdds = e.target.checked; save('showOdds', showOdds); render(); });
 document.addEventListener('visibilitychange', () => { if (!document.hidden) poll(); });
+// When served by serve.py (the desktop launcher), hold a connection open so the
+// server can shut itself down after the last tab closes.
+if (location.port === '8765') new EventSource('/alive');
 
 render();
-refresh(allWeeks());
+refresh(allWeeks()).then(refreshOdds);
+fetchHistory();
 setInterval(poll, 60 * 1000);

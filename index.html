@@ -4,13 +4,21 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>NFL Picks</title>
-<link rel="icon" href="favicon.svg" type="image/svg+xml">
+<link rel="icon" href="favicon.png" type="image/png">
+<link rel="apple-touch-icon" href="apple-touch-icon.png">
 <link rel="stylesheet" href="style.css">
 </head>
 <body>
 <nav>
   <button class="tab" data-tab="season">Regular Season</button>
   <button class="tab" data-tab="playoffs">Playoffs</button>
+  <button class="tab" data-tab="report">Disagreements</button>
+  <div id="filters">
+    <div class="seg" role="group" aria-label="Whose picks">
+      <button data-mode="mine">My Picks</button><button data-mode="market">Polymarket</button>
+    </div>
+    <label class="switch"><input type="checkbox" id="odds-toggle"><span class="track"></span>Odds</label>
+  </div>
   <span id="status"></span>
 </nav>
 <main>
@@ -19,6 +27,7 @@
     <div id="schedule"></div>
   </section>
   <section id="playoffs"></section>
+  <section id="report"></section>
 </main>
 <script src="app.js"></script>
 </body>
