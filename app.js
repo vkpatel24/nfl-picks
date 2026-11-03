@@ -306,6 +306,10 @@ function renderDivisions({ R, divisions, seeds }) {
 
 function renderSchedule({ R }) {
   const t = selected;
+  if (!regular().length) {
+    $('#schedule').innerHTML = `<div class="head">${logo(t)}<h2>${name(t)}</h2></div><p class="empty">Loading schedule…</p>`;
+    return;
+  }
   const list = regular().filter(g => g.home === t || g.away === t).sort((a, b) => a.week - b.week);
   const byWeek = Object.fromEntries(list.map(g => [g.week, g]));
   const maxWeek = Math.max(18, ...list.map(g => g.week));

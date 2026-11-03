@@ -107,6 +107,7 @@ main { padding: 24px; max-width: 1400px; margin: 0 auto; }
 .sched .when { color: var(--muted); font-size: 12px; }
 .sched .right { text-align: right; font-variant-numeric: tabular-nums; }
 .sched .bye td { color: var(--muted); }
+.empty { margin: 8px 0 0; color: var(--muted); }
 
 .res { font-weight: 600; }
 .res.W { color: var(--win); }
